@@ -26,6 +26,12 @@ source-repository head
 library
   exposed-modules:
       Arguments
+      Graph
+      Input
+      Output
+      Processing
+      Types
+      Util
   other-modules:
       Paths_braindumper
   hs-source-dirs:
