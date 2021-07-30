@@ -5,7 +5,6 @@ module Arguments
   ) where
 
 import Options.Applicative
-import Text.Read (readMaybe)
 
 data ProgramOptions = ProgramOptions
   { outputDir :: FilePath
@@ -26,9 +25,6 @@ optionParser = ProgramOptions
   <*> some (strArgument (
              help "Folders containing Org files created with Org Roam"
           <> metavar "ROAM-FOLDERS" ))
-
-parseToMaybe :: (Read a) => String -> Maybe (Maybe a)
-parseToMaybe = fmap Just . readMaybe
 
 programOptions :: ParserInfo ProgramOptions
 programOptions = info (optionParser <**> helper) (

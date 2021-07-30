@@ -35,6 +35,7 @@ library
     , containers
     , data-default
     , directory
+    , extra
     , filepath
     , mtl
     , optparse-applicative
@@ -56,6 +57,7 @@ executable braindumper-exe
     , containers
     , data-default
     , directory
+    , extra
     , filepath
     , mtl
     , optparse-applicative
@@ -78,6 +80,7 @@ test-suite braindumper-test
     , containers
     , data-default
     , directory
+    , extra
     , filepath
     , mtl
     , optparse-applicative

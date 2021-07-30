@@ -1,48 +1,49 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE ViewPatterns #-}
 module Main where
 
-import Control.Monad (forM_, when)
 import Control.Monad.Except
+import Control.Monad.Extra (whenJust, whenM)
 import Control.Monad.Writer
 -- import Control.Monad.Trans.Maybe
 -- import Control.Monad.Trans.Class (lift)
 import Data.Default (def)
 import Data.Either (isLeft, rights)
+import Data.Either.Extra (maybeToEither, isLeft, rights)
+import Data.Function ((&))
 import Data.List (find, intercalate, foldl')
-import Data.Maybe (isJust, isNothing, mapMaybe, maybe)
+import Data.List.Extra (list, mconcatMap)
 import Data.Text (Text)
 import Options.Applicative (execParser)
 import System.Directory ( createDirectoryIfMissing
                         , createFileLink
                         , doesPathExist
-                        , getCurrentDirectory
                         , listDirectory
                         , removeFile
                         )
-import System.Environment (getArgs)
 import System.FilePath (isExtensionOf, equalFilePath, (</>), (<.>))
 import System.IO  (hPutStrLn, stderr)
 import Text.Pandoc.Class (runIO, runPure)
-import Text.Pandoc.Definition ( MetaValue(MetaInlines)
-                              , Block(Div, Header, Para)
+import Text.Pandoc.Definition ( docTitle
+                              , Block(Header)
                               , Inline(..)
-                              , Meta(..)
                               , Pandoc(..)
                               )
-import Text.Pandoc.Builder (header)
+import Text.Pandoc.Builder (divWith, doc, link, para)
 import Text.Pandoc.Walk (query, walk, walkM)
 import Text.Pandoc.Shared (stringify)
 import Text.Pandoc.Readers (readOrg)
-import Text.Pandoc.Writers (writePlain, writeHtml5String)
+import Text.Pandoc.Writers (writeHtml5String)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as LT
 import qualified Data.Text.IO as TIO
 import qualified Data.Text.Lazy.IO as LazyTIO
+import qualified Text.Pandoc.Builder as B
 import Arguments
 
 newtype FileId = FileId { getIdText :: Text } deriving (Eq, Ord, Show)
@@ -56,11 +57,8 @@ data FileData = FileData
   , fileLinkedIds :: S.Set FileId
   } deriving (Eq, Show)
 
--- TODO Use Pandoc.Builder helpers
-
 writerOptions = def
 readerOptions = def --{readerStandalone=True}
-
 
 main :: IO ()
 main = runProgram =<< execParser programOptions
@@ -70,15 +68,17 @@ runProgram ProgramOptions{..} = do
   fileList <- concat <$> mapM findOrgFiles folderList
 
   fileParseResults <- mapM (runExceptT . getFileData) fileList
-  -- TODO: Warn if root provided but not found
+
   let fileData = rights fileParseResults
-      rootNode = do
-        r <- rootNodePath
-        find (\file -> filePath file `equalFilePath` r) fileData
-      idToData' = M.fromList $ zip (map fileId fileData) fileData
+  rootNode <- case rootNodePath of
+    Just r -> whenNothing (find (equalFilePath r . filePath) fileData) $
+                          putStrLn ("Root node not found: " ++ r)
+    Nothing -> return Nothing
+
+  let idToData' = M.fromList $ zip (map fileId fileData) fileData
       idToData = maybe
           idToData'
-          (M.restrictKeys idToData' . extractSubgraph idToData')
+          (M.restrictKeys idToData' . connectedNodes idToData')
           (fileId <$> rootNode)
 
   -- Report errors in file parsing
@@ -88,51 +88,57 @@ runProgram ProgramOptions{..} = do
   createDirectoryIfMissing False outputDir
 
   forM_ (M.elems idToData)  $ \currentFile@FileData{..} -> do
-    -- TODO: Neaten this up
-    let (fileContents', failedIds) = runWriter $
-            walkM (fixLink idToData) fileContents
-        fileContents'' = walk demoteHeaders fileContents'
-        failedIdString = intercalate ", " $ map (show . getIdText) failedIds
+    let backlinks = findBacklinks idToData fileId
+
+        (processedAST, failedIds) = fileContents
+            & runWriter . walkM (fixLink idToData)
+            . walk demoteHeaders
+            . addBacklinks backlinks
+            . addTitleHeader
+
+        spuriousLinks = processedAST & flip query $ \case
+            (Span (_, elem "spurious-link" -> True,
+                      lookup "target" -> Just target)
+             text) -> [target]
+            _ -> []
+
+        badLinksString = mconcatMap ("\n" <>) $
+          map getIdText failedIds ++ spuriousLinks
+
         outputPath = fileToOutputPath outputDir currentFile
-
-        fileContents''' = addBacklinks fileContents'' $
-           findBacklinks idToData fileId
-        fileContents'''' = addTitle fileTitlePandoc fileContents'''
-
-        (Right html) = runPure $ writeHtml5String writerOptions fileContents''''
+        (Right html) = runPure $ writeHtml5String writerOptions processedAST
 
     -- Report missing IDs
-    -- TODO: Warn on spurious-link spans
-    unless (null failedIds) $
-        hPutStrLn stderr $
-           filePath ++ " contains invalid links: " ++ failedIdString
+    unless (null failedIds && null spuriousLinks) $
+        let err = mconcat [T.pack filePath, " contains invalid links: ",
+                           badLinksString]
+        in  TIO.hPutStrLn stderr err
+
     TIO.writeFile outputPath html
 
   -- Create symlink to root node
-  when (isJust rootNode) $ let (Just r) = rootNode in
-    safeCreateLink (idToOutputName $ fileId r) (outputDir </> "root.html")
+  whenJust rootNode $ \r ->
+    let target = idToOutputName $ fileId r
+        link = outputDir </> "root.html"
+    in safeCreateLink target link
 
-  buildIndex (M.elems idToData) (outputDir </> "index.html")
+  buildIndex (M.elems idToData) $ outputDir </> "index.html"
 
 safeCreateLink :: FilePath -> FilePath -> IO ()
 safeCreateLink linkTarget linkPath = do
-  pathExists <- doesPathExist linkPath
-  when pathExists $ removeFile linkPath
+  whenM (doesPathExist linkPath) $ removeFile linkPath
   createFileLink linkTarget linkPath
 
 buildIndex :: [FileData] -> FilePath -> IO ()
 buildIndex fileData outputPath = do
   TIO.writeFile outputPath indexHtml
     where (Right indexHtml) = runPure $ writeHtml5String def ir
-          ir = Pandoc (Meta M.empty)
-                      [Para [Link emptyAttr
-                                  fileTitlePandoc
-                                  (T.pack $ idToOutputName fileId, fileTitle)]
-                      | FileData{..} <- fileData]
+          ir = addTitleHeader . B.setTitle "All Pages" $ doc listing
+          listing = mconcatMap (para . fileLink) fileData
 
 
-extractSubgraph :: M.Map FileId FileData -> FileId -> S.Set FileId
-extractSubgraph idToData = add S.empty
+connectedNodes :: M.Map FileId FileData -> FileId -> S.Set FileId
+connectedNodes idToData = add S.empty
     where add :: S.Set FileId -> FileId -> S.Set FileId
           add s id =
             if id `M.member` idToData && id `S.notMember` s
@@ -156,7 +162,6 @@ fixLink idToData link@(Link attrs text (href, title)) =
           tell [fileId]
           return $ Span (addClasses ["broken-link", "internal-link"])
                         text
-
     Nothing -> return link
 
   where (htmlId, htmlClasses, htmlAttrs) = attrs
@@ -167,21 +172,20 @@ demoteHeaders :: Block -> Block
 demoteHeaders (Header n a i) = Header (n+1) a i
 demoteHeaders b = b
 
-addTitle :: [Inline] -> Pandoc -> Pandoc
-addTitle title (Pandoc m blocks) = Pandoc m $ titleHeader:blocks
-  where titleHeader = Header 1 emptyAttr title
+addTitleHeader :: Pandoc -> Pandoc
+addTitleHeader (Pandoc m blocks) = Pandoc m blocks'
+  where blocks' = titleHeader:blocks
+        titleHeader = Header 1 emptyAttr $ docTitle m
+        emptyAttr = ("", [], [])
 
 findBacklinks :: M.Map FileId FileData -> FileId -> [FileData]
 findBacklinks idToFile id = M.foldl (\a v ->
     if id `S.member` fileLinkedIds v then v:a else a) [] idToFile
 
-addBacklinks :: Pandoc -> [FileData] -> Pandoc
-addBacklinks (Pandoc m blocks) linkingFiles = Pandoc m (blocks ++ [backlinks])
-    where backlinks = Div ("", ["backlinks"], [])
-                          [Para [Link emptyAttr
-                                      fileTitlePandoc
-                                      (T.pack $ idToOutputName fileId, fileTitle)]
-                          | FileData{..} <- linkingFiles]
+addBacklinks :: [FileData] -> Pandoc -> Pandoc
+addBacklinks linkingFiles (Pandoc m blocks) = Pandoc m (blocks ++ backlinks)
+    where backlinks = B.toList $ divWith ("", ["backlinks"], []) listing
+          listing = mconcatMap (para. fileLink) linkingFiles
 
 idToOutputName :: FileId -> FilePath
 idToOutputName FileId{getIdText=id} = T.unpack id <.> "html"
@@ -228,10 +232,8 @@ getFilePandoc path = do
   withExceptT show $ liftEither pandoc
 
 getFileTitle :: Pandoc -> ExceptIO [Inline]
-getFileTitle (Pandoc Meta{..} _) =
-  maybe (throwError "Could not extract title") return title
-  where title = extract <$> unMeta M.!? "title"
-        extract (MetaInlines x) = x
+getFileTitle (Pandoc m _) =
+  list (throwError "Could not extract title") (\a b -> return $ a:b) $ docTitle m
 
 getFileData :: FilePath -> ExceptIO FileData
 getFileData path = do
@@ -246,4 +248,11 @@ getFileData path = do
                   , fileLinkedIds = findLinkedIds pandoc
                   }
 
-emptyAttr = ("", [], [])
+fileLink :: FileData -> B.Inlines
+fileLink FileData{fileTitle=linkTitle,..} = link url linkTitle linkText
+  where url = T.pack $ idToOutputName fileId
+        linkText = B.fromList fileTitlePandoc
+
+whenNothing :: (Monad m) => Maybe a -> m () -> m (Maybe a)
+whenNothing Nothing action = action >> return Nothing
+whenNothing x _ = return x
