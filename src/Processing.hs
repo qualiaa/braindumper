@@ -5,7 +5,7 @@ module Processing
   , addBacklinks
   , buildIndex
   , demoteHeaders
-  , fixLink
+  , fixLinks
   , processFileContents
   ) where
 
@@ -29,8 +29,8 @@ import qualified Text.Pandoc.Builder as B
 import Output (idToOutputName)
 import Types (FileId(..), FileData(..))
 
-fixLink :: M.Map FileId FileData -> Inline -> Writer [FileId] Inline
-fixLink idToData link@(Link attrs text (href, title)) =
+fixLinks :: M.Map FileId FileData -> Inline -> Writer [FileId] Inline
+fixLinks idToData link@(Link attrs text (href, title)) =
   case T.stripPrefix "id:" href of
     Just id ->
       let fileId = FileId id in
@@ -47,7 +47,7 @@ fixLink idToData link@(Link attrs text (href, title)) =
 
   where (htmlId, htmlClasses, htmlAttrs) = attrs
         addClasses newClasses = (htmlId, newClasses ++ htmlClasses, htmlAttrs)
-fixLink _ inline = return inline
+fixLinks _ inline = return inline
 
 demoteHeaders :: Block -> Block
 demoteHeaders (Header n a i) = Header (n+1) a i
@@ -80,8 +80,8 @@ processFileContents :: M.Map FileId FileData
                     -> [FileData]
                     -> Pandoc
                     -> (Pandoc, [FileId])
-processFileContents idToData fileBacklinks = runWriter
-     . walkM (fixLink idToData)
+processFileContents flatGraph fileBacklinks = runWriter
+     . walkM (fixLinks flatGraph)
      . walk demoteHeaders
      . addBacklinks fileBacklinks
      . addTitleHeader

@@ -49,10 +49,10 @@ runProgram ProgramOptions{..} = do
                           putStrLn ("Root node not found: " ++ r)
     Nothing -> return Nothing
 
-  let idToData' = M.fromList $ zip (map fileId fileData) fileData
-      idToData = maybe
-          idToData'
-          (M.restrictKeys idToData' . findConnectedNodes idToData')
+  let flatGraph' = M.fromList $ zip (map fileId fileData) fileData
+      flatGraph = maybe
+          flatGraph'
+          (M.restrictKeys flatGraph' . findConnectedNodes flatGraph')
           (fileId <$> rootNode)
 
   -- Report errors in file parsing
@@ -61,8 +61,8 @@ runProgram ProgramOptions{..} = do
 
   createDirectoryIfMissing False outputDir
 
-  forM_ (M.elems idToData)  $ \currentFile -> do
-    html <- convertFileToHtml idToData currentFile
+  forM_ (M.elems flatGraph)  $ \currentFile -> do
+    html <- convertFileToHtml flatGraph currentFile
     let outputPath = fileToOutputPath outputDir currentFile
     TIO.writeFile outputPath html
 
@@ -72,7 +72,7 @@ runProgram ProgramOptions{..} = do
         link = outputDir </> "root.html"
     in safeCreateLink target link
 
-  buildIndex (M.elems idToData) $ outputDir </> "index.html"
+  buildIndex (M.elems flatGraph) $ outputDir </> "index.html"
 
 findSpuriousLinks :: Pandoc -> [Text]
 findSpuriousLinks = query (\case
@@ -82,13 +82,13 @@ findSpuriousLinks = query (\case
     _ -> [])
 
 convertFileToHtml :: M.Map FileId FileData -> FileData -> IO Text
-convertFileToHtml idToData FileData{..} = do
+convertFileToHtml flatGraph FileData{..} = do
   -- TODO compute backlinks once for all files
   -- TODO compute failedIds once from backlinks
-  let backlinks = findBacklinks idToData fileId
+  let backlinks = findBacklinks flatGraph fileId
 
       (processedAST, failedIds) =
-        processFileContents idToData backlinks fileContents
+        processFileContents flatGraph backlinks fileContents
 
       spuriousLinks = findSpuriousLinks processedAST
 
