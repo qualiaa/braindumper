@@ -12,6 +12,7 @@ module Processing
 
 import Control.Monad.Writer (Writer, runWriter, tell)
 import Data.Default (def)
+import Data.Maybe (fromJust)
 import Data.List.Extra (mconcatMap)
 import Text.Pandoc.Builder (divWith, doc, link, para)
 import Text.Pandoc.Class (runPure)
@@ -30,10 +31,10 @@ import Output (idToOutputName)
 import Types (FileId(..), FileData(..))
 
 fixLinks :: M.Map FileId FileData -> Inline -> Writer [FileId] Inline
-fixLinks idToData link@(Link attrs text (href, title)) =
-  case T.stripPrefix "id:" href of
-    Just id ->
-      let fileId = FileId id in
+fixLinks idToData link@(Link attrs text (href, title))
+    | "id:" `T.isPrefixOf` href =
+      let id = fromJust $ T.stripPrefix "id:" href
+          fileId = FileId id in
         if fileId `M.member` idToData
         then
           return $ Link (addClasses ["internal-link"])
@@ -41,12 +42,18 @@ fixLinks idToData link@(Link attrs text (href, title)) =
                         (T.pack $ idToOutputName fileId, title)
         else do
           tell [fileId]
-          return $ Span (addClasses ["broken-link", "internal-link"])
-                        text
-    Nothing -> return link
+          return $ Span (addClasses ["broken-link", "internal-link"]) text
+
+    | "http" `T.isPrefixOf` href =
+        return $ Link (addClasses ["external-link"])
+                       text
+                       (href, title)
+
+    | otherwise = return link
 
   where (htmlId, htmlClasses, htmlAttrs) = attrs
         addClasses newClasses = (htmlId, newClasses ++ htmlClasses, htmlAttrs)
+
 fixLinks _ inline = return inline
 
 demoteHeaders :: Block -> Block
@@ -60,6 +67,7 @@ addTitleHeader (Pandoc m blocks) = Pandoc m blocks'
         emptyAttr = ("", [], [])
 
 addBacklinks :: [FileData] -> Pandoc -> Pandoc
+addBacklinks [] p = p
 addBacklinks linkingFiles (Pandoc m blocks) = Pandoc m (blocks ++ backlinks)
     where backlinks = B.toList $ divWith ("", ["backlinks"], []) listing
           listing = mconcatMap (para. fileLink) linkingFiles
@@ -84,4 +92,4 @@ processFileContents flatGraph fileBacklinks = runWriter
      . walkM (fixLinks flatGraph)
      . walk demoteHeaders
      . addBacklinks fileBacklinks
-     . addTitleHeader
+     -- . addTitleHeader
