@@ -51,9 +51,9 @@ runProgram ProgramOptions{..} = do
 
   let flatGraph' = M.fromList $ zip (map fileId fileData) fileData
       flatGraph = maybe
-          flatGraph'
-          (M.restrictKeys flatGraph' . findConnectedNodes flatGraph')
-          (fileId <$> rootNode)
+        flatGraph'
+        (M.restrictKeys flatGraph' . findConnectedNodes flatGraph')
+        (fileId <$> rootNode)
 
   -- Report errors in file parsing
   forM_ (zip fileList fileParseResults) $ \(path, r) ->
