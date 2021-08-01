@@ -41,6 +41,7 @@ library
     , containers
     , data-default
     , directory
+    , doctemplates
     , extra
     , filepath
     , mtl
@@ -63,6 +64,7 @@ executable braindumper-exe
     , containers
     , data-default
     , directory
+    , doctemplates
     , extra
     , filepath
     , mtl
@@ -86,6 +88,7 @@ test-suite braindumper-test
     , containers
     , data-default
     , directory
+    , doctemplates
     , extra
     , filepath
     , mtl

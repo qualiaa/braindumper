@@ -1,11 +1,13 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ViewPatterns #-}
+
 module Main where
 
 import Control.Monad(forM_, unless, when)
-import Control.Monad.Except (runExceptT)
+import Control.Monad.Except (runExceptT, throwError)
 import Control.Monad.Extra (whenJust)
 import Data.Default (def)
 import Data.Either (isLeft, rights)
@@ -17,8 +19,11 @@ import Options.Applicative (execParser)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath (equalFilePath, (</>))
 import System.IO  (hPutStrLn, stderr)
-import Text.Pandoc.Class (runPure)
-import Text.Pandoc.Definition (Inline(Span), Pandoc)
+import Text.DocTemplates (toVal, Context(..), Val(..))
+import Text.Pandoc (Inline(Span), Pandoc, PandocError(..), WriterOptions(..), runPure, runIO)
+import Text.Pandoc.Templates (compileTemplate,
+                              getTemplate,
+                              compileDefaultTemplate, runWithPartials)
 import Text.Pandoc.Walk (query)
 import Text.Pandoc.Writers (writeHtml5String)
 import qualified Data.Map.Strict as M
@@ -31,8 +36,6 @@ import Processing (buildIndex, processFileContents)
 import Output ( idToOutputName, fileToOutputPath, safeCreateLink)
 import Types (FileId(..), FileData(..))
 import Util (whenNothing)
-
-writerOptions = def
 
 main :: IO ()
 main = runProgram =<< execParser programOptions
@@ -62,7 +65,7 @@ runProgram ProgramOptions{..} = do
   createDirectoryIfMissing False outputDir
 
   forM_ (M.elems flatGraph)  $ \currentFile -> do
-    html <- convertFileToHtml flatGraph currentFile
+    html <- convertFileToHtml flatGraph pandocTemplatePath currentFile
     let outputPath = fileToOutputPath outputDir currentFile
     TIO.writeFile outputPath html
 
@@ -81,8 +84,8 @@ findSpuriousLinks = query (\case
      text) -> [target]
     _ -> [])
 
-convertFileToHtml :: M.Map FileId FileData -> FileData -> IO Text
-convertFileToHtml flatGraph FileData{..} = do
+convertFileToHtml :: M.Map FileId FileData -> Maybe FilePath -> FileData -> IO Text
+convertFileToHtml flatGraph template FileData{..} = do
   -- TODO compute backlinks once for all files
   -- TODO compute failedIds once from backlinks
   let backlinks = findBacklinks flatGraph fileId
@@ -102,4 +105,29 @@ convertFileToHtml flatGraph FileData{..} = do
                          badLinksString]
       in  TIO.hPutStrLn stderr err
 
+  -- Reproduced from https://github.com/jgm/pandoc/blob/60974538b25657c9aa37e72cc66ca3957912ddec/src/Text/Pandoc/App/OutputSettings.hs#L168
+  (Right template) <- runIO $ case template of
+    Nothing -> Just <$> compileDefaultTemplate "html"
+    Just path -> do
+      res <- getTemplate path >>= runWithPartials . compileTemplate path
+      case res of
+        Left e -> throwError $ PandocTemplateError $ T.pack e
+        Right t -> return $ Just t
+  let writerOptions = def { writerTemplate = template
+                          , writerVariables = setListVariable "css"
+                                (map T.pack ["style.css"]) mempty
+                          }
+
   return . fromRight' . runPure $ writeHtml5String writerOptions processedAST
+
+
+-- Reproduced from https://github.com/jgm/pandoc/blob/60974538b25657c9aa37e72cc66ca3957912ddec/src/Text/Pandoc/App/OutputSettings.hs#L115
+setListVariable _ [] ctx = ctx
+setListVariable k vs ctx =
+  let ctxMap = unContext ctx in
+    Context $
+    case M.lookup k ctxMap of
+      Just (ListVal xs) -> M.insert k
+                           (ListVal $ xs ++ map toVal vs) ctxMap
+      Just v -> M.insert k (ListVal $ v : map toVal vs) ctxMap
+      Nothing -> M.insert k (toVal vs) ctxMap

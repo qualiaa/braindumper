@@ -23,6 +23,7 @@ dependencies:
 - base >= 4.7 && < 5
 - pandoc > 2 && < 3
 - pandoc-types
+- doctemplates
 - containers
 - directory
 - filepath
